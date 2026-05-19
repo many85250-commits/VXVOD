@@ -135,7 +135,7 @@ async function handleVod(vodId, res) {
   }
 }
 
-async function handleProxy(targetUrl, res) {
+async function handleProxy(targetUrl, res, selfBase) {
   setCors(res);
   if (!targetUrl) { res.writeHead(400); res.end('Missing url'); return; }
   const allowed = ['cloudfront.net','akamaized.net','ttvnw.net','twitch.tv','amazon.com','jtvnw.net'];
@@ -147,10 +147,32 @@ async function handleProxy(targetUrl, res) {
     const upstream = await fetchRaw(targetUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Origin': 'https://www.twitch.tv', 'Referer': 'https://www.twitch.tv/' }
     });
-    const ct = upstream.headers['content-type'] || 'application/octet-stream';
-    res.setHeader('Content-Type', ct);
-    res.writeHead(upstream.status);
-    res.end(upstream.body);
+    let ct = upstream.headers['content-type'] || 'application/octet-stream';
+    
+    // Si c'est un M3U8, réécrit toutes les URLs pour les faire passer par le proxy
+    if (targetUrl.includes('.m3u8') || ct.includes('mpegurl') || ct.includes('x-mpegURL')) {
+      ct = 'application/vnd.apple.mpegurl';
+      let m3u8 = upstream.body.toString('utf8');
+      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      
+      // Réécrit chaque ligne qui est une URL
+      m3u8 = m3u8.split('\n').map(line => {
+        line = line.trim();
+        if (!line || line.startsWith('#')) return line;
+        // Construit l'URL absolue
+        let absUrl = line.startsWith('http') ? line : baseUrl + line;
+        // Proxifie
+        return selfBase + '/proxy?url=' + encodeURIComponent(absUrl);
+      }).join('\n');
+      
+      res.setHeader('Content-Type', ct);
+      res.writeHead(200);
+      res.end(m3u8);
+    } else {
+      res.setHeader('Content-Type', ct);
+      res.writeHead(upstream.status);
+      res.end(upstream.body);
+    }
   } catch(e) { res.writeHead(502); res.end('Upstream error: ' + e.message); }
 }
 
@@ -163,7 +185,7 @@ const server = http.createServer(async (req, res) => {
 
   const vodMatch = pathname.match(/^\/vod\/(\d+)$/);
   if (vodMatch) { await handleVod(vodMatch[1], res); return; }
-  if (pathname === '/proxy') { await handleProxy(parsed.query.url, res); return; }
+  if (pathname === '/proxy') { const proto = req.headers['x-forwarded-proto'] || 'https'; const host = req.headers['x-forwarded-host'] || req.headers.host; const selfBase = proto + '://' + host; await handleProxy(parsed.query.url, res, selfBase); return; }
 
   setCors(res); res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' }));
 });
