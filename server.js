@@ -8,16 +8,18 @@ const GQL = 'https://gql.twitch.tv/gql';
 
 function fetchJson(reqUrl, options = {}) {
   return new Promise((resolve, reject) => {
-    const parsed = new url.URL(reqUrl);
-    const lib = parsed.protocol === 'https:' ? https : http;
-    const req = lib.request(reqUrl, {
+    const lib = reqUrl.startsWith('https') ? https : http;
+    const reqOptions = new url.URL(reqUrl);
+    const req = lib.request({
+      hostname: reqOptions.hostname,
+      path: reqOptions.pathname + reqOptions.search,
       method: options.method || 'GET',
       headers: options.headers || {},
     }, res => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(data), raw: data }); }
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
         catch(e) { resolve({ status: res.statusCode, body: null, raw: data }); }
       });
     });
@@ -30,7 +32,10 @@ function fetchJson(reqUrl, options = {}) {
 function fetchRaw(reqUrl, options = {}) {
   return new Promise((resolve, reject) => {
     const lib = reqUrl.startsWith('https') ? https : http;
-    const req = lib.request(reqUrl, {
+    const parsed = new url.URL(reqUrl);
+    const req = lib.request({
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
       method: options.method || 'GET',
       headers: options.headers || {},
     }, res => {
@@ -46,8 +51,9 @@ function fetchRaw(reqUrl, options = {}) {
   });
 }
 
+// Récupère les métadonnées VOD + seekPreviewsURL via GQL
 async function fetchVodMeta(vodId) {
-  const query = `query($id:ID!){video(id:$id){id title broadcastType createdAt owner{login} seekPreviewsURL}}`;
+  const query = `query($id:ID!){video(id:$id){id title broadcastType seekPreviewsURL owner{login}}}`;
   const res = await fetchJson(GQL, {
     method: 'POST',
     headers: { 'Client-Id': CLIENT_ID, 'Content-Type': 'application/json' },
@@ -56,54 +62,8 @@ async function fetchVodMeta(vodId) {
   return res.body?.data?.video || null;
 }
 
-async function fetchPlaybackToken(vodId) {
-  const query = `{videoPlaybackAccessToken(id:"${vodId}",params:{platform:"web",playerBackend:"mediaplayer",playerType:"site"}){value signature}}`;
-  const res = await fetchJson(GQL, {
-    method: 'POST',
-    headers: { 'Client-Id': CLIENT_ID, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query })
-  });
-  return res.body?.data?.videoPlaybackAccessToken || null;
-}
-
-async function fetchUsherM3u8(vodId, token) {
-  const params = new URLSearchParams({
-    sig: token.signature, token: token.value,
-    allow_source: 'true', allow_spectre: 'true', allow_audio_only: 'true',
-    fast_bread: 'true', p: Math.floor(Math.random() * 999999),
-    platform: 'web', player_backend: 'mediaplayer',
-    playlist_include_framerate: 'true', reassignments_supported: 'true',
-    supported_codecs: 'avc1', transcode_mode: 'cbr_v1'
-  });
-  const usherUrl = `https://usher.twitchapps.com/vod/${vodId}.m3u8?${params}`;
-  const res = await fetchRaw(usherUrl, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': '*/*', 'Origin': 'https://www.twitch.tv', 'Referer': 'https://www.twitch.tv/',
-    }
-  });
-  return res.status === 200 ? res.body.toString() : null;
-}
-
-function parseM3u8Qualities(m3u8Text) {
-  const lines = m3u8Text.split('\n');
-  const qualities = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line.startsWith('#EXT-X-STREAM-INF')) {
-      const nameMatch = line.match(/NAME="([^"]+)"/);
-      const name = nameMatch ? nameMatch[1] : null;
-      if (lines[i+1] && !lines[i+1].startsWith('#')) {
-        const streamUrl = lines[i+1].trim();
-        if (name && streamUrl) qualities.push({ name, url: streamUrl });
-        i++;
-      }
-    }
-  }
-  return qualities;
-}
-
-function parseCdnFromSeekUrl(seekUrl) {
+// Extrait domain + hash depuis seekPreviewsURL
+function parseCdn(seekUrl) {
   if (!seekUrl) return null;
   try {
     const u = new url.URL(seekUrl);
@@ -112,23 +72,38 @@ function parseCdnFromSeekUrl(seekUrl) {
   } catch(e) { return null; }
 }
 
-async function tryDirectCdn(domain, hash) {
+// Teste les qualités CDN directement
+async function findQualities(domain, hash) {
   const qualities = [
-    { name: 'Source', path: 'chunked' }, { name: '720p60', path: '720p60' },
-    { name: '720p', path: '720p30' }, { name: '480p', path: '480p30' },
-    { name: '360p', path: '360p30' }, { name: '160p', path: '160p30' },
+    { name: 'Source', path: 'chunked' },
+    { name: '720p60', path: '720p60' },
+    { name: '720p', path: '720p30' },
+    { name: '480p', path: '480p30' },
+    { name: '360p', path: '360p30' },
+    { name: '160p', path: '160p30' },
   ];
-  const filenames = ['index-dvr.m3u8', 'index-muted-dvr.m3u8', 'index.m3u8'];
+  const files = ['index-dvr.m3u8', 'index-muted-dvr.m3u8', 'index.m3u8'];
   const found = [];
-  for (const q of qualities) {
-    for (const f of filenames) {
+
+  await Promise.all(qualities.map(async (q) => {
+    for (const f of files) {
       const testUrl = `${domain}/${hash}/${q.path}/${f}`;
       try {
-        const res = await fetchRaw(testUrl, { method: 'HEAD' });
-        if (res.status === 200 || res.status === 206) { found.push({ name: q.name, url: testUrl }); break; }
+        const res = await fetchRaw(testUrl, {
+          method: 'HEAD',
+          headers: { 'Origin': 'https://www.twitch.tv', 'Referer': 'https://www.twitch.tv/' }
+        });
+        if (res.status === 200 || res.status === 206) {
+          found.push({ name: q.name, url: testUrl });
+          break;
+        }
       } catch(e) {}
     }
-  }
+  }));
+
+  // Trie dans l'ordre souhaité
+  const order = ['Source','720p60','720p','480p','360p','160p'];
+  found.sort((a,b) => order.indexOf(a.name) - order.indexOf(b.name));
   return found;
 }
 
@@ -142,43 +117,19 @@ async function handleVod(vodId, res) {
   setCors(res);
   res.setHeader('Content-Type', 'application/json');
   try {
-    let qualities = [], method = null, meta = null;
+    const meta = await fetchVodMeta(vodId);
+    if (!meta) { res.writeHead(404); res.end(JSON.stringify({ error: 'VOD introuvable' })); return; }
 
-    // Méthode 1 : Token GQL + Usher
-    try {
-      const token = await fetchPlaybackToken(vodId);
-      if (token) {
-        const m3u8 = await fetchUsherM3u8(vodId, token);
-        if (m3u8 && m3u8.includes('#EXTM3U')) {
-          const q = parseM3u8Qualities(m3u8);
-          if (q.length > 0) { qualities = q; method = 'usher_token'; }
-        }
-      }
-    } catch(e) { console.log('Usher failed:', e.message); }
+    const cdn = parseCdn(meta.seekPreviewsURL);
+    if (!cdn) { res.writeHead(404); res.end(JSON.stringify({ error: 'CDN introuvable' })); return; }
 
-    // Méthode 2 : CDN direct
-    if (qualities.length === 0) {
-      try {
-        const vodMeta = await fetchVodMeta(vodId);
-        if (vodMeta) {
-          meta = { title: vodMeta.title, broadcastType: vodMeta.broadcastType };
-          const cdn = parseCdnFromSeekUrl(vodMeta.seekPreviewsURL);
-          if (cdn) {
-            const cdnQ = await tryDirectCdn(cdn.domain, cdn.hash);
-            if (cdnQ.length > 0) { qualities = cdnQ; method = 'cdn_direct'; }
-          }
-        }
-      } catch(e) { console.log('CDN failed:', e.message); }
-    }
+    const qualities = await findQualities(cdn.domain, cdn.hash);
+    if (!qualities.length) { res.writeHead(404); res.end(JSON.stringify({ error: 'Aucun flux trouvé' })); return; }
 
-    if (qualities.length === 0) {
-      res.writeHead(404);
-      res.end(JSON.stringify({ error: 'Aucun flux trouvé', vodId }));
-      return;
-    }
     res.writeHead(200);
-    res.end(JSON.stringify({ vodId, qualities, method, meta }));
+    res.end(JSON.stringify({ vodId, qualities, method: 'cdn_direct', meta: { title: meta.title } }));
   } catch(e) {
+    console.error(e);
     res.writeHead(500);
     res.end(JSON.stringify({ error: e.message }));
   }
@@ -187,7 +138,7 @@ async function handleVod(vodId, res) {
 async function handleProxy(targetUrl, res) {
   setCors(res);
   if (!targetUrl) { res.writeHead(400); res.end('Missing url'); return; }
-  const allowed = ['cloudfront.net','akamaized.net','twitchapps.com','ttvnw.net','twitch.tv','amazon.com'];
+  const allowed = ['cloudfront.net','akamaized.net','ttvnw.net','twitch.tv','amazon.com','jtvnw.net'];
   try {
     const parsed = new url.URL(targetUrl);
     if (!allowed.some(d => parsed.hostname.endsWith(d))) { res.writeHead(403); res.end('Domain not allowed'); return; }
@@ -196,7 +147,8 @@ async function handleProxy(targetUrl, res) {
     const upstream = await fetchRaw(targetUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Origin': 'https://www.twitch.tv', 'Referer': 'https://www.twitch.tv/' }
     });
-    res.setHeader('Content-Type', upstream.headers['content-type'] || 'application/octet-stream');
+    const ct = upstream.headers['content-type'] || 'application/octet-stream';
+    res.setHeader('Content-Type', ct);
     res.writeHead(upstream.status);
     res.end(upstream.body);
   } catch(e) { res.writeHead(502); res.end('Upstream error: ' + e.message); }
