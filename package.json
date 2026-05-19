@@ -1,0 +1,12 @@
+{
+  "name": "vxvod-proxy",
+  "version": "1.0.0",
+  "description": "VX VOD proxy server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
