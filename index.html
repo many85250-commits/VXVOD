@@ -523,9 +523,28 @@
     const video = document.getElementById('vod-player');
     if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
 
-    function tryLoad(url, isFallback) {
-      hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: false });
-      hlsInstance.loadSource(url);
+    // Passe tout par le proxy pour éviter CORS sur les segments .ts
+    const proxyBase = PROXY_SERVER + '/proxy?url=';
+
+    if (Hls.isSupported()) {
+      hlsInstance = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        // Intercepte chaque URL et la proxifie
+        loader: class extends Hls.DefaultConfig.loader {
+          load(context, config, callbacks) {
+            // Proxifie toutes les URLs sauf si déjà proxifiées
+            if (PROXY_SERVER && !context.url.includes(PROXY_SERVER)) {
+              context.url = proxyBase + encodeURIComponent(context.url);
+            }
+            super.load(context, config, callbacks);
+          }
+        }
+      });
+      const proxiedM3u8 = PROXY_SERVER
+        ? proxyBase + encodeURIComponent(streamUrl)
+        : streamUrl;
+      hlsInstance.loadSource(proxiedM3u8);
       hlsInstance.attachMedia(video);
       hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
         if (resumeAt > 0) video.currentTime = resumeAt;
@@ -533,20 +552,10 @@
         hideStatus('status-player');
       });
       hlsInstance.on(Hls.Events.ERROR, (e, data) => {
-        if (data.fatal && !isFallback && PROXY_SERVER) {
-          // Fallback via proxy
-          hlsInstance.destroy();
-          const proxied = PROXY_SERVER + '/proxy?url=' + encodeURIComponent(streamUrl);
-          tryLoad(proxied, true);
-        } else if (data.fatal) {
-          showStatus('status-player', 'Erreur de lecture. Essaie une autre qualité.', 'error');
-        }
+        if (data.fatal) showStatus('status-player', 'Erreur de lecture. Essaie une autre qualité.', 'error');
       });
-    }
-
-    if (Hls.isSupported()) {
-      tryLoad(streamUrl, false);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari — charge direct
       video.src = streamUrl;
       if (resumeAt > 0) video.addEventListener('loadedmetadata', () => video.currentTime = resumeAt, { once: true });
       video.play().catch(() => {});
