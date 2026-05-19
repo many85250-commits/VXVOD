@@ -521,17 +521,11 @@
 
   function loadStream(streamUrl, qualityName, resumeAt = 0) {
     const video = document.getElementById('vod-player');
-
-    // Proxifie l'URL via le serveur pour éviter les problèmes CORS
-    const proxiedUrl = PROXY_SERVER
-      ? `${PROXY_SERVER}/proxy?url=${encodeURIComponent(streamUrl)}`
-      : streamUrl;
-
     if (hlsInstance) { hlsInstance.destroy(); hlsInstance = null; }
 
-    if (Hls.isSupported()) {
+    function tryLoad(url, isFallback) {
       hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: false });
-      hlsInstance.loadSource(proxiedUrl);
+      hlsInstance.loadSource(url);
       hlsInstance.attachMedia(video);
       hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
         if (resumeAt > 0) video.currentTime = resumeAt;
@@ -539,10 +533,21 @@
         hideStatus('status-player');
       });
       hlsInstance.on(Hls.Events.ERROR, (e, data) => {
-        if (data.fatal) showStatus('status-player','Erreur de lecture. Essaie une autre qualité.','error');
+        if (data.fatal && !isFallback && PROXY_SERVER) {
+          // Fallback via proxy
+          hlsInstance.destroy();
+          const proxied = PROXY_SERVER + '/proxy?url=' + encodeURIComponent(streamUrl);
+          tryLoad(proxied, true);
+        } else if (data.fatal) {
+          showStatus('status-player', 'Erreur de lecture. Essaie une autre qualité.', 'error');
+        }
       });
+    }
+
+    if (Hls.isSupported()) {
+      tryLoad(streamUrl, false);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = proxiedUrl;
+      video.src = streamUrl;
       if (resumeAt > 0) video.addEventListener('loadedmetadata', () => video.currentTime = resumeAt, { once: true });
       video.play().catch(() => {});
     }
