@@ -565,8 +565,25 @@
     playVod(m[1], 'VOD Twitch');
   }
 
+  // ── SULLYGNOME : récupère stream_id + timestamp côté navigateur ──
+  async function getSullyData(channelLogin) {
+    try {
+      const res = await fetch(`https://sullygnome.com/channel/${channelLogin}/streams`);
+      const text = await res.text();
+      const channelId = /(?<=PageInfo.{1,1000}?"id":)\d+/.exec(text)?.[0];
+      if (!channelId) return null;
+      const d = await fetch(`https://sullygnome.com/api/tables/channeltables/streams/90/${channelId}/%20/1/1/desc/0/100`);
+      const json = await d.json();
+      return json?.data?.map(r => ({
+        stream_id: /(?<=stream\/)\d+/.exec(r?.streamUrl)?.[0] || r?.streamId,
+        timestamp_seconds: Math.floor(new Date(r?.startDateTime).getTime() / 1000),
+        channel_login: channelLogin,
+      })) || [];
+    } catch(e) { return null; }
+  }
+
   // ── PLAY VOD ─────────────────────────────────────────────────
-  async function playVod(vodId, title) {
+  async function playVod(vodId, title, channelLogin) {
     const vs = document.getElementById('video-section');
     vs.classList.add('visible');
     vs.scrollIntoView({ behavior:'smooth', block:'start' });
@@ -575,11 +592,27 @@
     document.getElementById('quality-btns').innerHTML = '';
     showStatus('status-player','Récupération des flux…','loading');
 
-    // Si serveur proxy configuré → lecture directe dans la page
     if (PROXY_SERVER) {
       try {
-        const res = await fetch(`${PROXY_SERVER}/vod/${vodId}`);
-        const data = await res.json();
+        // Essai 1 : méthode normale
+        let res = await fetch(`${PROXY_SERVER}/vod/${vodId}`);
+        let data = await res.json();
+
+        // Essai 2 : si échoue et qu'on a le channelLogin, on essaie via SullyGnome
+        if ((!data.qualities || !data.qualities.length) && channelLogin) {
+          showStatus('status-player','Recherche via historique des streams…','loading');
+          const sullyData = await getSullyData(channelLogin);
+          if (sullyData?.length) {
+            // Envoie les données SullyGnome au serveur
+            res = await fetch(`${PROXY_SERVER}/vod/${vodId}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ streams: sullyData, channel_login: channelLogin })
+            });
+            data = await res.json();
+          }
+        }
+
         if (data.qualities && data.qualities.length > 0) {
           currentQualities = data.qualities;
           hideStatus('status-player');
@@ -588,7 +621,7 @@
           return;
         }
       } catch(e) {
-        showStatus('status-player','Serveur proxy inaccessible. Ouverture sur TwitchNoSub…','error');
+        showStatus('status-player','Serveur proxy inaccessible.','error');
       }
     }
 
