@@ -194,6 +194,104 @@
     .footer-logo span { color: var(--purple-soft); }
     .footer-copy { font-size: 0.78rem; color: var(--muted); }
 
+    /* ── SIDEBAR FAVORIS ── */
+    .layout {
+      display: flex;
+      min-height: 100vh;
+      position: relative;
+      z-index: 1;
+    }
+    .sidebar {
+      width: 220px;
+      flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 1rem 0;
+      position: sticky;
+      top: 62px;
+      height: calc(100vh - 62px);
+      overflow-y: auto;
+    }
+    .sidebar-title {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 0 1rem 0.8rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 0.5rem;
+    }
+    .fav-item {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.6rem 1rem;
+      cursor: pointer;
+      transition: background 0.15s;
+      border-radius: 8px;
+      margin: 0 0.4rem;
+    }
+    .fav-item:hover { background: var(--surface2); }
+    .fav-avatar {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      object-fit: cover;
+      background: var(--surface2);
+      border: 2px solid var(--border);
+      flex-shrink: 0;
+    }
+    .fav-name {
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 0.85rem;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .fav-remove {
+      opacity: 0;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.9rem;
+      padding: 0.1rem 0.3rem;
+      border-radius: 4px;
+      transition: all 0.15s;
+    }
+    .fav-item:hover .fav-remove { opacity: 1; }
+    .fav-remove:hover { color: #ff6b6b; background: rgba(255,80,80,0.1); }
+    .fav-empty {
+      padding: 1rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+    .main-content { flex: 1; min-width: 0; }
+
+    /* Bouton étoile favoris */
+    .btn-fav {
+      background: none;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      padding: 0.5rem 0.8rem;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 1rem;
+      transition: all 0.2s;
+      margin-left: auto;
+    }
+    .btn-fav:hover { border-color: gold; color: gold; }
+    .btn-fav.active { border-color: gold; color: gold; background: rgba(255,215,0,0.1); }
+
+    @media (max-width: 600px) {
+      .sidebar { display: none; }
+    }
+
     @media (max-width: 600px) {
       nav { padding: 0 1rem; }
       .input-row { flex-direction: column; }
@@ -209,8 +307,18 @@
   <div class="logo">VX <span>VOD</span></div>
 </nav>
 
+<div class="layout">
+
+<!-- SIDEBAR FAVORIS -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-title">⭐ Favoris</div>
+  <div id="fav-list"><div class="fav-empty">Aucun favori.<br>Clique sur ⭐ après une recherche.</div></div>
+</aside>
+
+<div class="main-content">
+
 <!-- Banner config serveur -->
-<div id="server-banner">
+<div id="server-banner" style="display:none">
   <div class="banner-box">
     <span>🔧 Entre l'URL de ton serveur proxy pour activer la lecture directe dans la page :<br><strong>Ce soir après le déploiement sur Render.com</strong></span>
     <input type="text" class="banner-input" id="serverUrl" placeholder="https://ton-serveur.onrender.com" />
@@ -280,6 +388,7 @@
   </div>
 </section>
 
+</div></div><!-- fin main-content + layout -->
 <footer>
   <div class="footer-logo">VX <span>VOD</span></div>
   <p class="footer-copy">Aucune affiliation avec Twitch / Amazon.</p>
@@ -293,7 +402,7 @@
   const CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
   const GQL_URL   = 'https://gql.twitch.tv/gql';
 
-  let PROXY_SERVER = localStorage.getItem('vxvod_server') || '';
+  let PROXY_SERVER = localStorage.getItem('vxvod_server') || 'https://vxvod.onrender.com';
   let hlsInstance  = null;
   let currentVods  = [];
   let currentCursor = null;
@@ -371,18 +480,22 @@
       const followers = user.followers?.totalCount >= 1000
         ? (user.followers.totalCount/1000).toFixed(1)+'K followers'
         : (user.followers?.totalCount || 0)+' followers';
+      const isFav = getFavs().some(f => f.login === name.toLowerCase());
       const hdr = document.getElementById('streamer-header');
       hdr.style.display = 'flex';
       hdr.innerHTML = `
         <img class="streamer-avatar" src="${user.profileImageURL}" alt="${esc(user.displayName)}"
           onerror="this.style.display='none'" />
-        <div>
+        <div style="flex:1">
           <div class="streamer-name">${esc(user.displayName)}</div>
           <div class="streamer-meta">
             <span>👥 ${followers}</span>
             <span>🎬 Toutes les redifs</span>
           </div>
-        </div>`;
+        </div>
+        <button class="btn-fav ${isFav ? 'active' : ''}" id="fav-btn" onclick="toggleFav('${name.toLowerCase()}', '${esc(user.displayName)}', '${user.profileImageURL}')">
+          ⭐
+        </button>`;;
 
       const videos = await fetchVods(user.id, null);
       if (!videos || !videos.edges.length) {
@@ -561,6 +674,51 @@
       video.play().catch(() => {});
     }
   }
+
+  // ── FAVORIS ─────────────────────────────────────────────────
+  function getFavs() {
+    try { return JSON.parse(localStorage.getItem('vxvod_favs') || '[]'); } catch(e) { return []; }
+  }
+  function saveFavs(favs) {
+    localStorage.setItem('vxvod_favs', JSON.stringify(favs));
+  }
+  function toggleFav(login, displayName, avatar) {
+    let favs = getFavs();
+    const idx = favs.findIndex(f => f.login === login);
+    if (idx >= 0) {
+      favs.splice(idx, 1);
+      document.getElementById('fav-btn')?.classList.remove('active');
+    } else {
+      favs.unshift({ login, displayName, avatar });
+      document.getElementById('fav-btn')?.classList.add('active');
+    }
+    saveFavs(favs);
+    renderFavs();
+  }
+  function renderFavs() {
+    const favs = getFavs();
+    const list = document.getElementById('fav-list');
+    if (!favs.length) {
+      list.innerHTML = '<div class="fav-empty">Aucun favori.<br>Clique sur ⭐ après une recherche.</div>';
+      return;
+    }
+    list.innerHTML = favs.map(f => `
+      <div class="fav-item" onclick="loadFav('${f.login}')">
+        <img class="fav-avatar" src="${f.avatar}" alt="${esc(f.displayName)}" onerror="this.style.display='none'" />
+        <span class="fav-name">${esc(f.displayName)}</span>
+        <button class="fav-remove" onclick="event.stopPropagation();toggleFav('${f.login}','${esc(f.displayName)}','${f.avatar}')">✕</button>
+      </div>
+    `).join('');
+  }
+  function loadFav(login) {
+    document.getElementById('streamerInput').value = login;
+    switchTab('search');
+    searchStreamer();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // Init favoris
+  renderFavs();
 
   // ── UTILS ────────────────────────────────────────────────────
   function fmtDur(s) {
